@@ -1,6 +1,8 @@
 export function getTitleCandidates(result) {
   if (Array.isArray(result?.data?.candidates)) return result.data.candidates;
+  if (Array.isArray(result?.data?.titles)) return result.data.titles;
   if (Array.isArray(result?.candidates)) return result.candidates;
+  if (Array.isArray(result?.titles)) return result.titles;
   return [];
 }
 
@@ -59,10 +61,21 @@ export function pickTopTitleByStyle(items = []) {
     .map((item) => normalizeTitleItem(item))
     .filter((item) => item?.title);
 
+  if (!normalizedItems.length) return [];
+
+  // 如果后端没有返回 style，不要再分组，否则会被压缩成 1 个
+  const hasStyle = normalizedItems.some((item) => item.style);
+
+  if (!hasStyle) {
+    return normalizedItems.sort(
+      (a, b) => getScoreValue(b.score) - getScoreValue(a.score)
+    );
+  }
+
   const grouped = new Map();
 
   normalizedItems.forEach((item) => {
-    const styleKey = item.style || "__default__";
+    const styleKey = item.style;
     const current = grouped.get(styleKey);
 
     if (!current) {
@@ -75,17 +88,17 @@ export function pickTopTitleByStyle(items = []) {
     }
   });
 
-  return Array.from(grouped.values());
+  return Array.from(grouped.values()).sort(
+    (a, b) => getScoreValue(b.score) - getScoreValue(a.score)
+  );
 }
 
 export function getTopThreeCandidates(result) {
   const rawCandidates = getTitleCandidates(result);
-
   if (!rawCandidates.length) return [];
 
-  const stylePicked = pickTopTitleByStyle(rawCandidates);
-
-  return stylePicked.slice(0, 3);
+  const picked = pickTopTitleByStyle(rawCandidates);
+  return picked.slice(0, 4);
 }
 
 export function getBestTitleItem(result) {
@@ -96,7 +109,10 @@ export function getBestTitleItem(result) {
   }
 
   if (typeof best === "string") {
-    return { title: best };
+    const matched = getTopThreeCandidates(result).find(
+      (item) => item.title === best
+    );
+    return matched || { title: best };
   }
 
   return best;

@@ -1,3 +1,8 @@
+const path = require("path");
+require("dotenv").config({
+  path: path.resolve(__dirname, ".env"),
+});
+
 const express = require("express");
 const cors = require("cors");
 
@@ -19,6 +24,9 @@ app.get("/api/health", (req, res) => {
     success: true,
     message: "Server is running",
     modelEnabled: Boolean(process.env.DEEPSEEK_API_KEY),
+    modelBaseUrl: process.env.DEEPSEEK_BASE_URL || "",
+    modelName: process.env.DEEPSEEK_MODEL || "",
+    port: PORT,
   });
 });
 
@@ -32,6 +40,9 @@ initDatabase()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
+      console.log(
+        `DeepSeek enabled: ${Boolean(process.env.DEEPSEEK_API_KEY)}`
+      );
     });
   })
   .catch((error) => {

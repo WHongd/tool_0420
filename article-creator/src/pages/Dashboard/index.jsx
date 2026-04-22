@@ -75,6 +75,8 @@ export default function Dashboard() {
     return () => clearTimeout(timer);
   }, [lastInsertedAt]);
 
+  const topGenerateLoading = isWeitoutiao ? contentLoading : titleLoading;
+
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="max-w-3xl mx-auto px-4 py-6">
@@ -93,7 +95,7 @@ export default function Dashboard() {
           platform={platform}
           setPlatform={setPlatform}
           platformOptions={platformOptions}
-          loading={titleLoading}
+          loading={topGenerateLoading}
           onGenerate={handleGenerate}
           onReset={handleStartNewCreation}
         />
@@ -107,10 +109,11 @@ export default function Dashboard() {
         {!isWeitoutiao && (
           <TitleResultPanel
             candidates={candidates}
+            loading={titleLoading}
             bestTitleItem={bestTitleItem}
             selectedTitle={selectedTitle}
             onPickTitle={handlePickTitle}
-            onUseBest={handleUseBestTitle}
+            onUseBestTitle={handleUseBestTitle}
             error={titleAnalysisError}
           />
         )}
@@ -143,8 +146,9 @@ export default function Dashboard() {
             setArticleContent={setArticleContent}
             contentLoading={contentLoading}
             onGenerateOpening={handleGenerateOpening}
-             onGenerateFullArticle={generateStructuredArticle} // ✅ 新增
+            onGenerateFullArticle={generateStructuredArticle}
             isSaving={isSaving}
+            platform={platform}
           />
         </div>
       </div>
