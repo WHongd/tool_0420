@@ -1,409 +1,44 @@
-/**
- * 内容生成服务
- * ----------------------------------------
- * 说明：
- * 1. 这是当前项目的核心内容生成层
- * 2. 保持现有接口不变，方便前端直接继续调用
- * 3. 公众号、今日头条、微头条分别走不同平台规则
- * 4. 公众号风格：类似“也评”——强调表达、判断、现实感，但不是照抄
- * 5. 今日头条：强调观点、争议、讨论感，结尾互动要和正文内容相关
- * 6. 微头条：短、直接、快速表达观点
- */
+const { getWechatPrompt } = require("../prompts/wechatPrompt");
+const { getToutiaoPrompt } = require("../prompts/toutiaoPrompt");
+const { getWeitoutiaoPrompt } = require("../prompts/weitoutiaoPrompt");
 
 function normalizePlatform(platform) {
   const value = String(platform || "").trim().toLowerCase();
-  if (value === "weitoutiao") return "weitoutiao";
   if (value === "toutiao") return "toutiao";
+  if (value === "weitoutiao") return "weitoutiao";
   return "wechat";
 }
 
-function normalizePersona(persona) {
-  const value = String(persona || "").trim().toLowerCase();
-  if (value === "emotion") return "emotion";
-  if (value === "professional") return "professional";
-  return "normal";
-}
-
-/**
- * 文本压缩
- * 用于把多余空白压成单空格，避免 prompt 或结果太散
- */
 function compactText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
-/**
- * 输出清洗
- * 目的：
- * 1. 去掉 Markdown 痕迹（** / ## / ```）
- * 2. 合并过多空行
- */
 function cleanModelOutput(text) {
   return String(text || "")
     .replace(/\*\*/g, "")
     .replace(/^###\s*/gm, "")
     .replace(/^##\s*/gm, "")
     .replace(/^#\s*/gm, "")
-    .replace(/```[\s\S]*?```/g, "")
+    .replace(new RegExp("`{3}[\\s\\S]*?`{3}", "g"), "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
-/**
- * 人设风格说明
- * 用于 prompt 里控制语言倾向
- */
-function getPersonaStyle(persona) {
-  const p = normalizePersona(persona);
+function safeExtractJson(text, fallback) {
+  try {
+    return JSON.parse(text);
+  } catch {}
 
-  if (p === "emotion") {
-    return {
-      label: "情绪共鸣型",
-      opening: "先抓情绪，再讲观点",
-      language: "口语化、真实、带温度",
-      avoid: "避免鸡汤和喊口号",
-    };
+  const match = String(text || "").match(/(\{[\s\S]*\})/);
+  if (!match?.[1]) return fallback;
+
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return fallback;
   }
-
-  if (p === "professional") {
-    return {
-      label: "专业分析型",
-      opening: "先定义问题，再拆逻辑",
-      language: "清晰、克制、信息密度高",
-      avoid: "避免空泛表达和大词堆砌",
-    };
-  }
-
-  return {
-    label: "自然表达型",
-    opening: "从现实感受切入",
-    language: "自然、简洁、接地气",
-    avoid: "避免机械句式和模板腔",
-  };
 }
 
-/**
- * 平台风格说明
- * 用于 prompt 区分平台差异
- */
-function getPlatformStyle(platform) {
-  const p = normalizePlatform(platform);
-
-  if (p === "weitoutiao") {
-    return {
-      label: "微头条",
-      goal: "短、狠、快，快速表达观点",
-      lengthHint: "200-400字",
-      structure: "开头钩子 + 核心观点 + 快速收束",
-      avoid: "避免写成长文章，避免过多分标题",
-    };
-  }
-
-  if (p === "toutiao") {
-    return {
-      label: "今日头条",
-      goal: "观点鲜明，有信息量，有讨论感",
-      lengthHint: "600-1200字",
-      structure: "争议切入 + 拆解分析 + 观点收束",
-      avoid: "避免公众号腔和过度抒情",
-    };
-  }
-
-  return {
-    label: "微信公众号",
-    goal: "有阅读感、有表达感、有层次，不像说明文",
-    lengthHint: "1000-1800字",
-    structure: "观点切入 + 现实展开 + 判断收束",
-    avoid: "避免过度模板化，避免像报告或教程",
-  };
-}
-
-/**
- * 本地 fallback：标题候选
- * 用途：
- * 1. 没配模型时也能返回结果
- * 2. 模型异常时兜底
- */
-function buildLocalTitleCandidates(topic, platform, persona, candidateCount = 4) {
-  const safeTopic = compactText(topic) || "这个话题";
-  const p = normalizePlatform(platform);
-  const r = normalizePersona(persona);
-  const count = Math.max(3, Number(candidateCount) || 4);
-
-  const titlePools = {
-    wechat: {
-      normal: [
-        `很多人都在聊“${safeTopic}”，但真正的问题还没说透`,
-        `关于“${safeTopic}”，我越来越觉得重点不是表面`,
-        `“${safeTopic}”背后，藏着一个更现实的真相`,
-        `别急着判断“${safeTopic}”，真正该想的是这一步`,
-      ],
-      emotion: [
-        `说实话，“${safeTopic}”最让人难受的，不只是结果`,
-        `看到“${safeTopic}”，我终于明白很多人为什么沉默了`,
-        `“${safeTopic}”这件事，越想越觉得不是小问题`,
-        `很多人以为“${safeTopic}”只是巧合，其实不是`,
-      ],
-      professional: [
-        `“${safeTopic}”为什么越讨论越乱？关键在这几点`,
-        `拆开“${safeTopic}”看，真正值得关注的是这层逻辑`,
-        `关于“${safeTopic}”，大多数讨论都忽略了核心变量`,
-        `“${safeTopic}”背后真正的判断框架，我想讲清楚`,
-      ],
-    },
-    toutiao: {
-      normal: [
-        `“${safeTopic}”为什么总能引发争议？真正的原因在后面`,
-        `很多人都在谈“${safeTopic}”，但重点根本不是表面`,
-        `“${safeTopic}”刷屏之后，我反而更想说这句实话`,
-        `关于“${safeTopic}”，这几个问题不想清楚很容易看偏`,
-      ],
-      emotion: [
-        `说实话，“${safeTopic}”这事，越看越让人不是滋味`,
-        `“${safeTopic}”背后最扎心的，其实不是热搜上的那些话`,
-        `很多人看到“${safeTopic}”在吵，我却想到了更现实的一面`,
-        `“${safeTopic}”为什么能戳中那么多人？答案很现实`,
-      ],
-      professional: [
-        `“${safeTopic}”到底该怎么看？这几点最关键`,
-        `围绕“${safeTopic}”，真正值得分析的是这条逻辑链`,
-        `关于“${safeTopic}”，表面争议背后其实是认知分歧`,
-        `“${safeTopic}”争来争去，不如先把这几个问题讲明白`,
-      ],
-    },
-    weitoutiao: {
-      normal: [
-        `“${safeTopic}”这事，真的没那么简单`,
-        `关于“${safeTopic}”，我想说句不太讨好的实话`,
-        `“${safeTopic}”别只看热闹，重点其实在后面`,
-        `很多人讨论“${safeTopic}”，但真正想透的不多`,
-      ],
-      emotion: [
-        `说实话，“${safeTopic}”越看越让人心里发堵`,
-        `“${safeTopic}”这件事，最难受的是那种无力感`,
-        `很多人看到“${safeTopic}”只是生气，我却觉得心酸`,
-        `“${safeTopic}”看似只是个事，背后却是很多人的现实`,
-      ],
-      professional: [
-        `“${safeTopic}”到底值不值得讨论？关键看这几点`,
-        `围绕“${safeTopic}”，最该先想清楚的是逻辑`,
-        `“${safeTopic}”这件事，别急着站队，先看清问题`,
-        `关于“${safeTopic}”，我更关心背后的因果关系`,
-      ],
-    },
-  };
-
-  const personaKey = titlePools[p]?.[r] ? r : "normal";
-  const pool = titlePools[p]?.[personaKey] || titlePools.wechat.normal;
-
-  return pool.slice(0, count).map((title, index) => ({
-    title,
-    score: 96 - index * 3,
-    reason:
-      index === 0
-        ? "冲突感更强，更容易吸引点击"
-        : index === 1
-        ? "更适合引发好奇和停留"
-        : index === 2
-        ? "更偏观点表达，适合建立作者风格"
-        : "更自然，适合平台发布",
-  }));
-}
-
-/**
- * 本地 fallback：微头条正文
- */
-function buildLocalWeitoutiao({ topic, persona }) {
-  const safeTopic = compactText(topic) || "这个话题";
-  const r = normalizePersona(persona);
-
-  if (r === "emotion") {
-    return `说实话，关于“${safeTopic}”，很多人表面上在讨论一件事，实际上是在表达委屈、压力和不甘。你以为只是一个小话题，放到现实里才会发现，它真正影响的是情绪、判断和选择。很多时候，不是事情本身有多复杂，而是身处其中的人太容易被消耗。`;
-  }
-
-  if (r === "professional") {
-    return `围绕“${safeTopic}”，如果只看表面现象，很容易得出片面结论。真正值得关注的是它背后的逻辑链条：问题为什么发生、影响了谁、会带来什么结果，以及普通人该如何判断和应对。把这几点想清楚，内容才有价值。`;
-  }
-
-  return `很多人聊“${safeTopic}”时，只停留在表面判断。但真正值得说的，不只是一个观点，而是它背后的现实处境、常见误区和实际影响。把这件事讲明白，往往比单纯表态更有价值。`;
-}
-
-/**
- * 本地 fallback：公众号大纲
- */
-function buildLocalOutline({ title, persona }) {
-  const safeTitle = compactText(title) || "这个主题";
-  const r = normalizePersona(persona);
-
-  if (r === "emotion") {
-    return [
-      {
-        id: "section_1",
-        order: 1,
-        title: "开头：先把情绪拉进来",
-        summary: `直接点出“${safeTitle}”最让人有感触的地方。`,
-      },
-      {
-        id: "section_2",
-        order: 2,
-        title: "问题为什么会发生",
-        summary: "说明背后的原因，不只是发泄情绪。",
-      },
-      {
-        id: "section_3",
-        order: 3,
-        title: "现实里最常见的场景",
-        summary: "用典型场景让读者对号入座。",
-      },
-      {
-        id: "section_4",
-        order: 4,
-        title: "我的判断",
-        summary: "明确表达你的态度，不要模糊。",
-      },
-    ];
-  }
-
-  if (r === "professional") {
-    return [
-      {
-        id: "section_1",
-        order: 1,
-        title: "背景与定义",
-        summary: `先把“${safeTitle}”的讨论边界讲清楚。`,
-      },
-      {
-        id: "section_2",
-        order: 2,
-        title: "核心问题拆解",
-        summary: "拆出 2-3 个关键点。",
-      },
-      {
-        id: "section_3",
-        order: 3,
-        title: "原因与影响",
-        summary: "解释为什么会这样，以及会带来什么结果。",
-      },
-      {
-        id: "section_4",
-        order: 4,
-        title: "结论与建议",
-        summary: "给出清晰结论和可执行建议。",
-      },
-    ];
-  }
-
-  return [
-    {
-      id: "section_1",
-      order: 1,
-      title: "开头：背景与问题",
-      summary: `用简短语言引出“${safeTitle}”为什么值得讨论。`,
-    },
-    {
-      id: "section_2",
-      order: 2,
-      title: "核心观点一",
-      summary: "先讲最重要的切入点。",
-    },
-    {
-      id: "section_3",
-      order: 3,
-      title: "核心观点二",
-      summary: "补充第二层分析和细节。",
-    },
-    {
-      id: "section_4",
-      order: 4,
-      title: "结尾：总结与判断",
-      summary: "收束全文，给出更明确的判断。",
-    },
-  ];
-}
-
-/**
- * 本地 fallback：单段内容
- */
-function buildLocalSection({ articleTitle, section, persona }) {
-  const title = compactText(articleTitle) || "这个主题";
-  const sectionTitle = compactText(section?.title) || "这一部分";
-  const summary = compactText(section?.summary || "");
-  const r = normalizePersona(persona);
-
-  if (r === "emotion") {
-    return `围绕“${title}”，这一部分最重要的不是把话说满，而是把真实感受说透。\n\n${summary}\n\n很多人遇到类似情况时，表面上看是在讨论一件事，实际上是在表达压力、委屈或者不甘。真正能打动人的内容，不是大道理，而是那种“我也经历过”的感觉。`;
-  }
-
-  if (r === "professional") {
-    return `围绕“${title}”，这一部分重点分析“${sectionTitle}”。\n\n${summary}\n\n可以从问题定义、关键变量和实际影响三个层面展开，这样内容会更清晰。写作时尽量减少空泛判断，多给出可验证的场景、逻辑和结论。`;
-  }
-
-  return `围绕“${title}”，这一部分重点展开“${sectionTitle}”。\n\n${summary}\n\n可以从用户场景、核心问题和实际价值三个角度继续往下写，让内容更完整、更有层次。写作时尽量避免空泛描述，优先给出具体表达、简短判断和可执行的信息。`;
-}
-
-/**
- * 本地 fallback：头条结尾互动
- */
-function buildLocalToutiaoEnding(title, content = "") {
-  const safeTitle = compactText(title) || "这件事";
-  const text = compactText(content);
-
-  if (/误判|看偏|理解错|判断/.test(text)) {
-    return "你觉得这件事真的是大家想多了，还是很多人一直看偏了？";
-  }
-
-  if (/压力|现实|无奈|代价|成本/.test(text)) {
-    return "如果这件事真的发生在你身上，你会怎么选？";
-  }
-
-  if (/争议|站队|对立|吵/.test(text)) {
-    return "这件事你更认同哪一种看法？";
-  }
-
-  return `对于“${safeTitle}”，你更认同哪种判断？`;
-}
-
-/**
- * 本地 fallback：整文
- */
-function buildLocalArticle({ title, platform, persona }) {
-  const p = normalizePlatform(platform);
-  const outline = p === "wechat" ? buildLocalOutline({ title, persona }) : [];
-
-  const opening =
-    normalizePersona(persona) === "emotion"
-      ? `说实话，看到“${title}”这个话题，我第一反应不是复杂，而是很多人真的一直没把它想明白。`
-      : normalizePersona(persona) === "professional"
-      ? `围绕“${title}”这个主题，如果只做表层表达，很容易失去内容价值。`
-      : `很多人一开始看到“${title}”这个问题时，往往只会停留在表面理解。`;
-
-  let content = opening;
-
-  if (p === "wechat") {
-    outline.forEach((section) => {
-      content += `\n\n${buildLocalSection({
-        articleTitle: title,
-        section,
-        persona,
-      })}`;
-    });
-  } else {
-    content += `\n\n${buildLocalWeitoutiao({ topic: title, persona })}`;
-  }
-
-  if (p === "toutiao") {
-    content += `\n\n${buildLocalToutiaoEnding(title, content)}`;
-  }
-
-  return {
-    outline,
-    content: cleanModelOutput(content),
-  };
-}
-
-/**
- * 读取模型配置
- */
 function getModelConfig() {
   return {
     apiKey: process.env.DEEPSEEK_API_KEY || "",
@@ -415,15 +50,10 @@ function getModelConfig() {
   };
 }
 
-/**
- * 调用模型
- */
 async function callChatModel(messages, options = {}) {
   const config = getModelConfig();
 
-  if (!config.apiKey) {
-    return null;
-  }
+  if (!config.apiKey) return null;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -438,8 +68,8 @@ async function callChatModel(messages, options = {}) {
       body: JSON.stringify({
         model: config.model,
         messages,
-        temperature: options.temperature ?? 0.85,
-        max_tokens: options.maxTokens ?? 1200,
+        temperature: options.temperature ?? 0.88,
+        max_tokens: options.maxTokens ?? 1500,
         stream: false,
       }),
       signal: controller.signal,
@@ -453,309 +83,211 @@ async function callChatModel(messages, options = {}) {
     const json = await response.json();
     return String(json?.choices?.[0]?.message?.content || "").trim();
   } catch (error) {
-    if (error?.name === "AbortError") {
-      throw new Error(`模型请求超时（${config.timeoutMs}ms）`);
-    }
-    throw error;
+    console.error("模型调用失败:", error.message);
+    return null;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-/**
- * 平台主 Prompt
- * 重点：
- * - 公众号：类似“也评”的表达型风格，但不是照抄
- * - 今日头条：观点+讨论感
- * - 微头条：短促直接
- */
-function buildSystemPrompt(platform, persona) {
+function detectTitleType(title) {
+  const t = String(title || "");
+
+  if (/不安|难受|扎心|说实话|心酸|无力感/.test(t)) {
+    return "emotion";
+  }
+
+  if (/很多人|问题不在|根本不在|看错|没看懂|但/.test(t)) {
+    return "judgement";
+  }
+
+  if (/信号|不是偶然|意味着|变化在后面|接下来/.test(t)) {
+    return "signal";
+  }
+
+  if (/普通人|吃亏|影响|代价|成本/.test(t)) {
+    return "reality";
+  }
+
+  return "normal";
+}
+
+function buildArticlePrompt(title, platform) {
   const p = normalizePlatform(platform);
-  const personaStyle = getPersonaStyle(persona);
-  const platformStyle = getPlatformStyle(platform);
+  const type = detectTitleType(title);
+  const safeTitle = compactText(title) || "这个主题";
 
-  if (p === "wechat") {
+  const commonRules = `
+通用要求：
+1. 写之前先在内部确定一个核心观点，但不要把“核心观点是”写出来。
+2. 整篇文章必须围绕这个观点展开，不要东一段西一段。
+3. 像人在表达，不要像AI总结材料。
+4. 涉及人物、领导人、公司高管、时事信息时，如果不确定最新情况，不要写死具体人名和身份。
+5. 不要编造事实，不要使用不确定的“当前、最新、最近”表达。
+6. 不要输出 Markdown 格式。
+`.trim();
+
+  if (type === "emotion") {
     return `
-你是一个中文公众号写作助手，擅长写“有观点、有人味、带现实感”的内容。
+请围绕标题“${safeTitle}”写一篇文章。
 
-你的公众号写作风格要求：
-1. 更像一个有判断的作者在表达，而不是在做知识讲解。
-2. 风格可以参考高阅读量观点号的表达方式：直接、有态度、有现实感，但不要模仿具体作者句子。
-3. 开头不要铺垫太长，尽快进入真正想说的话。
-4. 正文不要写成“首先、其次、最后”的说明文。
-5. 多写判断、情绪、现实场景、人的处境，不要全是概念和套话。
-6. 可以有节奏变化，句子长短自然，不要太整齐。
-7. 不要输出 Markdown 标记，不要出现星号或标题符号等格式。
-8. 只输出最终内容，不解释你的写法。
+写法：
+1. 从情绪或感受切入。
+2. 写清楚为什么这件事让人不安、难受或有触动。
+3. 多写普通人的现实处境。
+4. 不要讲大道理，要像人在说话。
+5. 结尾收回到一个明确判断。
 
-【事实约束】
-1. 涉及国家领导人、公司高管、战争、外交、政策、日期、身份变动等时效信息时：
-   - 如果不能确认最新信息，不要写死具体人名和头衔。
-   - 优先使用“高层、决策层、相关方、管理层”等更稳妥表达。
-2. 不要编造事实，不要把不确定信息写成确定事实。
-3. 不要轻易使用“当前、最新、最近、目前”这类容易过期的表达，除非能够确定。
+${commonRules}
 
-当前平台：
-- 平台：${platformStyle.label}
-- 目标：${platformStyle.goal}
-- 建议长度：${platformStyle.lengthHint}
-- 结构偏好：${platformStyle.structure}
-- 要避免：${platformStyle.avoid}
-
-当前人设：
-- 人设类型：${personaStyle.label}
-- 开头方式：${personaStyle.opening}
-- 表达风格：${personaStyle.language}
-- 要避免：${personaStyle.avoid}
+只返回正文。
 `.trim();
   }
 
-  if (p === "toutiao") {
+  if (type === "judgement") {
     return `
-你是一个中文今日头条爆文写作助手。
+请围绕标题“${safeTitle}”写一篇文章。
 
-要求：
-1. 标题和正文都要更有讨论感、争议感、停留感。
-2. 正文要有观点、有分析、有现实感，不要写成公众号随笔。
-3. 结尾不要写固定互动句，应该根据正文内容自然生成一个能引发评论的收尾。
-4. 句子要自然，不要模板腔。
-5. 不要输出 Markdown 标记，不要出现星号或标题符号等格式。
-6. 只输出最终内容，不解释过程。
+写法：
+1. 开头直接指出：很多人可能看错了。
+2. 说明大家为什么会看错。
+3. 再讲真正的问题在哪里。
+4. 中间要有现实例子或具体处境。
+5. 结尾给出明确判断。
 
-【事实约束】
-1. 涉及人物身份、国家领导人、公司高管、时事事件时：
-   - 如果不能确认最新信息，不要写具体名字和职务。
-   - 用“相关方、高层、决策层、一方”等替代。
-2. 不要编造事件、结果或时间线。
-3. 避免写“当前情况如何”这种可能已过期的确定性描述。
+${commonRules}
 
-当前平台：
-- 平台：${platformStyle.label}
-- 目标：${platformStyle.goal}
-- 建议长度：${platformStyle.lengthHint}
-- 结构偏好：${platformStyle.structure}
-- 要避免：${platformStyle.avoid}
+只返回正文。
+`.trim();
+  }
 
-当前人设：
-- 人设类型：${personaStyle.label}
-- 开头方式：${personaStyle.opening}
-- 表达风格：${personaStyle.language}
-- 要避免：${personaStyle.avoid}
+  if (type === "signal") {
+    return `
+请围绕标题“${safeTitle}”写一篇文章。
+
+写法：
+1. 解释这个“信号”到底是什么。
+2. 说明它为什么不是偶然。
+3. 推演可能带来的变化。
+4. 让读者感觉“后面可能还有更大的变化”。
+5. 结尾收束成判断，不要空泛总结。
+
+${commonRules}
+
+只返回正文。
+`.trim();
+  }
+
+  if (type === "reality") {
+    return `
+请围绕标题“${safeTitle}”写一篇文章。
+
+写法：
+1. 从普通人的现实利益切入。
+2. 写清楚这件事会影响谁。
+3. 不要只讲宏大叙事，要落到生活、工作、钱、选择、压力。
+4. 中间要有现实感。
+5. 结尾给出一个克制但明确的判断。
+
+${commonRules}
+
+只返回正文。
 `.trim();
   }
 
   return `
-你是一个中文微头条写作助手。
+请围绕标题“${safeTitle}”写一篇文章。
 
-要求：
-1. 内容要短、直接、开头抓人。
-2. 第一两句尽快进入观点。
-3. 不要铺垫太多，不要写成长文。
-4. 要有态度，但不要过度表演。
-5. 不要输出 Markdown 标记，不要出现星号或标题符号等格式。
-6. 只输出最终内容，不解释过程。
+写法：
+1. 开头直接进入问题。
+2. 中间围绕一个核心观点展开。
+3. 多写判断、现实、人的处境。
+4. 不要写成说明文。
+5. 结尾自然收束。
 
-【事实约束】
-1. 不确定的信息不要写死，尤其是人物身份和时效信息。
-2. 不要编造事实。
+${commonRules}
 
-当前平台：
-- 平台：${platformStyle.label}
-- 目标：${platformStyle.goal}
-- 建议长度：${platformStyle.lengthHint}
-- 结构偏好：${platformStyle.structure}
-- 要避免：${platformStyle.avoid}
-
-当前人设：
-- 人设类型：${personaStyle.label}
-- 开头方式：${personaStyle.opening}
-- 表达风格：${personaStyle.language}
-- 要避免：${personaStyle.avoid}
+只返回正文。
 `.trim();
 }
 
-/**
- * 安全提取 JSON
- */
-function safeExtractJson(text, fallback) {
-  try {
-    return JSON.parse(text);
-  } catch {}
+function buildSystemPrompt(platform) {
+  const p = normalizePlatform(platform);
 
-  const match = String(text || "").match(
-    /```json\s*([\s\S]*?)\s*```|(\{[\s\S]*\})|(\[[\s\S]*\])/
-  );
-  const raw = match?.[1] || match?.[2] || match?.[3];
-  if (!raw) return fallback;
-
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
-}
-
-/**
- * 生成今日头条结尾互动
- * 核心：
- * 1. 单独根据正文生成
- * 2. 不能写死成“你怎么看”
- */
-async function generateToutiaoEnding({ title, content, persona }) {
-  const systemPrompt = `
-你是一个今日头条编辑。
-
-任务：
-基于文章正文内容，生成一句适合放在结尾的互动收尾。
-
-要求：
-1. 只能输出一句话。
-2. 必须贴合正文核心观点。
-3. 不能泛泛地只写“你怎么看”。
-4. 要像自然收尾，不要太硬。
-5. 不要输出 Markdown。
+  if (p === "toutiao") {
+    return `
+你是一个今日头条内容作者。
+要求：标题和正文要有冲突感、判断感、现实感。
+正文要直接、有观点、有讨论空间。
+结尾不要主动写固定互动句，系统会单独处理。
 `.trim();
-
-  const userPrompt = `
-标题：${compactText(title) || "这个主题"}
-人设：${getPersonaStyle(persona).label}
-
-正文：
-${compactText(content).slice(0, 1800)}
-
-请写一句最适合放在结尾的互动收尾。
-`.trim();
-
-  try {
-    const result = await callChatModel(
-      [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      { temperature: 0.85, maxTokens: 120 }
-    );
-
-    const cleaned = cleanModelOutput(result);
-    if (cleaned) return cleaned;
-  } catch {}
-
-  return buildLocalToutiaoEnding(title, content);
-}
-
-/**
- * 如果今日头条正文最后没有互动句，就自动补一条
- */
-async function appendToutiaoEndingIfNeeded({ title, content, persona }) {
-  const cleaned = cleanModelOutput(content);
-  if (!cleaned) return cleaned;
-
-  const lastParagraph = cleaned.split(/\n+/).filter(Boolean).slice(-1)[0] || "";
-  const alreadyInteractive =
-    /[？?]/.test(lastParagraph) &&
-    /(你|大家|评论区|怎么看|怎么选|更认同|会不会|觉得)/.test(lastParagraph);
-
-  if (alreadyInteractive) {
-    return cleaned;
   }
 
-  const ending = await generateToutiaoEnding({
-    title,
-    content: cleaned,
-    persona,
-  });
+  if (p === "weitoutiao") {
+    return `
+你是一个微头条作者。
+要求：短、直接、有观点，开头尽快抓住人。
+`.trim();
+  }
 
-  return `${cleaned}\n\n${ending}`.trim();
+  return `
+你是一个微信公众号作者。
+要求：有观点、有人味、有现实感。
+风格类似高阅读量观点号，但不要模仿具体作者句子。
+文章要像人在表达判断，不要像说明文。
+`.trim();
 }
 
-/**
- * 生成标题
- */
+function buildLocalTitleFallback(topic) {
+  const safeTopic = compactText(topic) || "这个话题";
+
+  return {
+    titles: [
+      {
+        title: `${safeTopic}这件事，可能没那么简单`,
+        score: 90,
+        reason: "有提醒感，容易引发继续阅读",
+      },
+      {
+        title: `很多人都在聊${safeTopic}，但重点不在这`,
+        score: 88,
+        reason: "有反转感，能制造点击欲",
+      },
+      {
+        title: `${safeTopic}背后，普通人更该看懂这一点`,
+        score: 86,
+        reason: "有现实代入感",
+      },
+    ],
+    bestTitle: `${safeTopic}这件事，可能没那么简单`,
+    fallback: true,
+  };
+}
+
 async function generateTitles({
   topic,
   platform,
   persona,
   candidateCount = 4,
 }) {
+  const p = normalizePlatform(platform);
   const count = Math.max(3, Number(candidateCount) || 4);
 
+  let userPrompt = "";
+
+  if (p === "wechat") {
+    userPrompt = getWechatPrompt(topic, count, compactText);
+  } else if (p === "toutiao") {
+    userPrompt = getToutiaoPrompt(topic, count, compactText);
+  } else {
+    userPrompt = getWeitoutiaoPrompt(topic, count, compactText);
+  }
+
   try {
-    const systemPrompt = buildSystemPrompt(platform, persona);
-    const userPrompt = `
-请围绕主题“${compactText(topic) || "这个话题"}”，为微信公众号生成 ${count} 个标题候选。
-
-【核心目标】
-这些标题必须让中国读者产生一种感觉：
-👉 “这事可能和我有关 / 我可能看错了 / 这里有我没想明白的东西”
-
----
-
-【必须体现的3种感觉（至少命中2种）】
-
-1. ⚠️ “这事没那么简单”
-- 表面是一个事，背后是另一层
-- 看似合理，其实问题更深
-
-2. 🧠 “很多人理解错了”
-- 大多数讨论方向是偏的
-- 关键点被忽略
-
-3. 💰 “和普通人有关”
-- 影响生活 / 钱 / 工作 / 安全感 / 未来
-- 不是别人，是“你我”
-
----
-
-【推荐使用这些表达方式（直接用类似句式）】
-
-✔ 很多人都在聊X，但真正的问题在…
-✔ 这件事最值得警惕的，不是表面
-✔ 别只盯着X，更大的变化在后面
-✔ X不是偶然，而是一个信号
-✔ 看懂X，你就知道接下来会发生什么
-✔ 说实话，X让我开始有点不安
-✔ 这件事对普通人来说，可能没那么简单
-✔ 真正难受的，其实不是X本身
-
----
-
-【标题风格要求】
-
-- 像一个“见过事的人”在提醒
-- 不是在分析，而是在点破
-- 不要写完整逻辑，要“留一口没说透”
-- 可以有一点情绪，但不要夸张
-
----
-
-【强制限制】
-
-- ❌ 不要写“关于XX的分析 / 几点思考”
-- ❌ 不要太对称（像AI）
-- ❌ 不要全是一个句式
-- ❌ 不要标题党（震惊、必看）
-
----
-
-【输出格式】
-
-返回 JSON：
-{
-  "titles": [
-    { "title": "标题1", "score": 95, "reason": "这个标题为什么容易让人点开（从普通人/误判/现实角度说）" }
-  ],
-  "bestTitle": "最佳标题"
-}
-
-只返回 JSON，不要解释
-`.trim();
-
-    const content = await callChatModel(
-      [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      { temperature: 0.92, maxTokens: 900 }
-    );
+    const content = await callChatModel([{ role: "user", content: userPrompt }], {
+      temperature: 0.92,
+      maxTokens: 900,
+    });
 
     const parsed = safeExtractJson(content, null);
 
@@ -770,12 +302,6 @@ async function generateTitles({
         .slice(0, count);
 
       if (titles.length) {
-        while (titles.length < 3) {
-          titles.push(
-            buildLocalTitleCandidates(topic, platform, persona, 4)[titles.length]
-          );
-        }
-
         return {
           titles,
           bestTitle:
@@ -783,40 +309,32 @@ async function generateTitles({
         };
       }
     }
-  } catch {}
+  } catch (error) {
+    console.error("标题生成失败:", error.message);
+  }
 
-  const titles = buildLocalTitleCandidates(topic, platform, persona, count);
-  return {
-    titles,
-    bestTitle: titles[0]?.title || "",
-    fallback: true,
-  };
+  return buildLocalTitleFallback(topic);
 }
 
-/**
- * 生成微头条
- */
-async function generateWeitoutiao({
-  topic,
-  platform = "weitoutiao",
-  persona,
-}) {
-  try {
-    const systemPrompt = buildSystemPrompt(platform, persona);
-    const userPrompt = `
-请围绕主题“${compactText(topic) || "这个话题"}”，写一篇适合微头条发布的短内容。
+async function generateWeitoutiao({ topic, platform = "weitoutiao", persona }) {
+  const safeTopic = compactText(topic) || "这个话题";
+
+  const prompt = `
+请围绕主题“${safeTopic}”写一篇微头条。
 
 要求：
 1. 200-400字。
-2. 开头尽快进入观点。
-3. 更像人在表达，不像说明书。
-4. 只返回正文。
+2. 开头直接进入观点。
+3. 语言自然，有态度。
+4. 不要写成说明文。
+5. 不要输出 Markdown。
 `.trim();
 
+  try {
     const content = await callChatModel(
       [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
+        { role: "system", content: buildSystemPrompt("weitoutiao") },
+        { role: "user", content: prompt },
       ],
       { temperature: 0.9, maxTokens: 800 }
     );
@@ -827,51 +345,35 @@ async function generateWeitoutiao({
   } catch {}
 
   return {
-    content: buildLocalWeitoutiao({ topic, persona }),
+    content: `说实话，关于“${safeTopic}”，很多人看到的只是表面。真正值得关注的，是它背后对普通人的现实影响。`,
     fallback: true,
   };
 }
 
-/**
- * 生成公众号大纲
- */
 async function generateOutline({ title, platform, persona }) {
-  try {
-    const systemPrompt = buildSystemPrompt(platform, persona);
+  const safeTitle = compactText(title) || "这个主题";
 
-    const userPrompt =
-      normalizePlatform(platform) === "wechat"
-        ? `
-请围绕标题“${compactText(title) || "这个主题"}”，生成一份更适合公众号表达型写作的大纲。
+  const prompt = `
+请围绕标题“${safeTitle}”生成文章大纲。
 
 要求：
-1. 4-5个部分。
-2. 每个部分都要有标题和一句摘要。
-3. 不要太像教程或报告。
-4. 更强调“观点推进、现实展开、判断收束”。
-5. 返回 JSON 数组：
+1. 4个部分。
+2. 每个部分有标题和一句摘要。
+3. 不要太像教程，要有观点推进。
+
+返回 JSON 数组：
 [
   { "id": "section_1", "order": 1, "title": "部分标题", "summary": "一句摘要" }
 ]
-只返回 JSON。
-`.trim()
-        : `
-请围绕标题“${compactText(title) || "这个主题"}”，生成文章大纲。
 
-要求：
-1. 4-5个部分。
-2. 每个部分都要有标题和一句摘要。
-3. 返回 JSON 数组：
-[
-  { "id": "section_1", "order": 1, "title": "部分标题", "summary": "一句摘要" }
-]
 只返回 JSON。
 `.trim();
 
+  try {
     const content = await callChatModel(
       [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
+        { role: "system", content: buildSystemPrompt(platform) },
+        { role: "user", content: prompt },
       ],
       { temperature: 0.8, maxTokens: 900 }
     );
@@ -891,54 +393,60 @@ async function generateOutline({ title, platform, persona }) {
   } catch {}
 
   return {
-    sections: buildLocalOutline({ title, persona }),
+    sections: [
+      {
+        id: "section_1",
+        order: 1,
+        title: "先把问题抛出来",
+        summary: `围绕“${safeTitle}”直接进入核心问题。`,
+      },
+      {
+        id: "section_2",
+        order: 2,
+        title: "为什么很多人看偏了",
+        summary: "指出常见误解。",
+      },
+      {
+        id: "section_3",
+        order: 3,
+        title: "真正值得关注的地方",
+        summary: "展开现实影响。",
+      },
+      {
+        id: "section_4",
+        order: 4,
+        title: "最后给出判断",
+        summary: "收束全文。",
+      },
+    ],
     fallback: true,
   };
 }
 
-/**
- * 生成单段正文
- */
-async function generateSection({
-  articleTitle,
-  platform,
-  persona,
-  section,
-}) {
-  try {
-    const systemPrompt = buildSystemPrompt(platform, persona);
+async function generateSection({ articleTitle, platform, persona, section }) {
+  const safeTitle = compactText(articleTitle) || "这个主题";
+  const sectionTitle = compactText(section?.title) || "这一部分";
+  const summary = compactText(section?.summary || "");
 
-    const userPrompt =
-      normalizePlatform(platform) === "wechat"
-        ? `
-请为公众号文章“${compactText(articleTitle) || "这个主题"}”写其中一个部分。
+  const prompt = `
+请为文章“${safeTitle}”写其中一个部分。
 
 当前部分：
-- 标题：${compactText(section?.title) || "这一部分"}
-- 摘要：${compactText(section?.summary) || ""}
+- 标题：${sectionTitle}
+- 摘要：${summary}
 
 要求：
-1. 更像真人在表达，不像材料总结。
-2. 有观点、有现实感、有判断。
+1. 像真人表达，不像材料总结。
+2. 有观点、有现实感。
 3. 不要使用 Markdown 小标题。
 4. 只返回正文。
-`.trim()
-        : `
-请为文章“${compactText(articleTitle) || "这个主题"}”写其中一个部分。
-
-当前部分：
-- 标题：${compactText(section?.title) || "这一部分"}
-- 摘要：${compactText(section?.summary) || ""}
-
-要求：
-1. 内容具体。
-2. 只返回正文。
 `.trim();
 
+  try {
     const content = await callChatModel(
       [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
+        { role: "system", content: buildSystemPrompt(platform) },
+        { role: "user", content: prompt },
       ],
       { temperature: 0.86, maxTokens: 1000 }
     );
@@ -949,29 +457,64 @@ async function generateSection({
   } catch {}
 
   return {
-    content: cleanModelOutput(
-      buildLocalSection({ articleTitle, section, persona })
-    ),
+    content: `围绕“${safeTitle}”，这一部分重点讲“${sectionTitle}”。${summary ? `\n\n${summary}` : ""}`,
     fallback: true,
   };
 }
 
-/**
- * 生成整篇文章
- * 平台处理：
- * - wechat：大纲 + 分段
- * - weitoutiao：直接短内容
- * - toutiao：直接整文 + 追加贴合内容的互动尾句
- */
+async function generateToutiaoEnding({ title, content }) {
+  const prompt = `
+基于下面这篇今日头条正文，生成一句适合放在结尾的互动收尾。
+
+要求：
+1. 只能输出一句话。
+2. 必须贴合正文核心观点。
+3. 不要只写“你怎么看”。
+4. 要自然，能引发评论。
+
+标题：${compactText(title)}
+正文：${compactText(content).slice(0, 1600)}
+`.trim();
+
+  try {
+    const result = await callChatModel([{ role: "user", content: prompt }], {
+      temperature: 0.85,
+      maxTokens: 120,
+    });
+
+    const cleaned = cleanModelOutput(result);
+    if (cleaned) return cleaned;
+  } catch {}
+
+  return "这件事你更认同哪一种判断？";
+}
+
+async function appendToutiaoEndingIfNeeded({ title, content }) {
+  const cleaned = cleanModelOutput(content);
+  if (!cleaned) return cleaned;
+
+  const lastParagraph = cleaned.split(/\n+/).filter(Boolean).slice(-1)[0] || "";
+
+  const alreadyInteractive =
+    /[？?]/.test(lastParagraph) &&
+    /(你|大家|评论区|怎么看|怎么选|更认同|觉得)/.test(lastParagraph);
+
+  if (alreadyInteractive) return cleaned;
+
+  const ending = await generateToutiaoEnding({ title, content: cleaned });
+  return `${cleaned}\n\n${ending}`.trim();
+}
+
 async function generateArticle({
   title,
   platform,
   persona,
   withOutline = true,
 }) {
-  try {
-    const p = normalizePlatform(platform);
+  const p = normalizePlatform(platform);
+  const safeTitle = compactText(title) || "这个主题";
 
+  try {
     if (p === "wechat" && withOutline) {
       const outlineResult = await generateOutline({ title, platform, persona });
       const sections = outlineResult.sections || [];
@@ -984,6 +527,7 @@ async function generateArticle({
           persona,
           section,
         });
+
         blocks.push(part.content || "");
       }
 
@@ -995,7 +539,12 @@ async function generateArticle({
     }
 
     if (p === "weitoutiao") {
-      const result = await generateWeitoutiao({ topic: title, platform, persona });
+      const result = await generateWeitoutiao({
+        topic: title,
+        platform,
+        persona,
+      });
+
       return {
         outline: [],
         content: cleanModelOutput(result.content || ""),
@@ -1003,42 +552,12 @@ async function generateArticle({
       };
     }
 
-    const systemPrompt = buildSystemPrompt(platform, persona);
-
-    const userPrompt =
-      p === "toutiao"
-        ? `
-      请围绕标题“${compactText(title) || "这个主题"}”，生成一篇适合今日头条发布的完整文章。
-
-要求：
-
-1. 写之前，先在内部确定一个“核心判断”（不要写出来）
-2. 整篇文章必须围绕这个判断展开
-3. 每一段都要推进这个判断，而不是信息拼接
-4. 要有现实感、人的处境、具体判断
-5. 开头直接进入问题，不要铺垫
-6. 正文不要写固定互动句（我会单独处理结尾）
-7. 不要写成公众号风格
-8. 只返回正文
-`.trim()
-        : `
-请围绕标题“${compactText(title) || "这个主题"}”，生成一篇完整文章。
-
-要求：
-
-1. 写之前，先在内部确定一个“核心观点”（不要写出来）
-2. 整篇文章必须围绕这个观点展开
-3. 每一段都服务这个观点，不要东一段西一段
-4. 更像人在表达，而不是总结材料
-5. 多写判断、现实感、人的状态
-6. 避免空话、套话
-7. 只返回正文
-`.trim();
+    const prompt = buildArticlePrompt(safeTitle, platform);
 
     const content = await callChatModel(
       [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
+        { role: "system", content: buildSystemPrompt(platform) },
+        { role: "user", content: prompt },
       ],
       { temperature: 0.88, maxTokens: 1800 }
     );
@@ -1047,9 +566,8 @@ async function generateArticle({
       const finalContent =
         p === "toutiao"
           ? await appendToutiaoEndingIfNeeded({
-              title,
+              title: safeTitle,
               content,
-              persona,
             })
           : cleanModelOutput(content);
 
@@ -1061,14 +579,14 @@ async function generateArticle({
   } catch {}
 
   return {
-    ...buildLocalArticle({ title, platform, persona }),
+    outline: [],
+    content: `围绕“${safeTitle}”，这件事最值得讨论的不是表面，而是它背后对普通人的现实影响。`,
     fallback: true,
   };
 }
 
 module.exports = {
   normalizePlatform,
-  normalizePersona,
   generateTitles,
   generateWeitoutiao,
   generateOutline,
