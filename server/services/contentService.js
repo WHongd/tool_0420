@@ -1,6 +1,7 @@
 const { getWechatPrompt } = require("../prompts/wechatPrompt");
 const { getToutiaoPrompt } = require("../prompts/toutiaoPrompt");
 const { getWeitoutiaoPrompt } = require("../prompts/weitoutiaoPrompt");
+const { getWechatArticlePrompt } = require("../prompts/wechatArticlePrompt");
 
 function normalizePlatform(platform) {
   const value = String(platform || "").trim().toLowerCase();
@@ -25,18 +26,27 @@ function cleanModelOutput(text) {
 }
 
 function safeExtractJson(text, fallback) {
+  const rawText = String(text || "").trim();
+
   try {
-    return JSON.parse(text);
+    return JSON.parse(rawText);
   } catch {}
 
-  const match = String(text || "").match(/(\{[\s\S]*\})/);
-  if (!match?.[1]) return fallback;
-
-  try {
-    return JSON.parse(match[1]);
-  } catch {
-    return fallback;
+  const objectMatch = rawText.match(/\{[\s\S]*\}/);
+  if (objectMatch?.[0]) {
+    try {
+      return JSON.parse(objectMatch[0]);
+    } catch {}
   }
+
+  const arrayMatch = rawText.match(/\[[\s\S]*\]/);
+  if (arrayMatch?.[0]) {
+    try {
+      return JSON.parse(arrayMatch[0]);
+    } catch {}
+  }
+
+  return fallback;
 }
 
 function getModelConfig() {
@@ -82,12 +92,124 @@ async function callChatModel(messages, options = {}) {
 
     const json = await response.json();
     return String(json?.choices?.[0]?.message?.content || "").trim();
-  } catch (error) {
-    console.error("模型调用失败:", error.message);
+  } catch (e) {
+    console.error("模型调用失败:", e.message);
     return null;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function getContextValue(input = {}) {
+  return compactText(
+    input.context ||
+      input.newsContext ||
+      input.newsFacts ||
+      input.material ||
+      input.materials ||
+      ""
+  );
+}
+
+function buildContextBlock(context) {
+  const safeContext = compactText(context);
+
+  if (safeContext) {
+    return `
+【新闻事实素材】
+${safeContext}
+
+【事实使用要求】
+1. 标题和正文必须围绕以上事实展开，不能只围绕抽象主题发挥。
+2. 可以分析、判断、延伸，但不能编造素材中没有提供的具体时间、地点、人物、职务、结果。
+3. 如果素材里有明确时间、地点、人物、事件，可以使用；如果没有提供，就不要自行补充。
+4. 涉及时政、领导人、战争、外交、政策时，宁可表达克制，也不要写错事实。
+`.trim();
+  }
+
+  return `
+【事实限制】
+当前没有提供具体新闻事实素材。
+
+要求：
+1. 不要编造具体时间、地点、人物、职务、发言和事件结果。
+2. 不要轻易使用“今天、刚刚、最新、目前”等确定性表达。
+3. 可以使用“相关方、外界、决策层、高层、这类变化、相关表态”等稳妥表达。
+4. 标题和正文要有现实判断，但不能假装掌握当天最新事实。
+`.trim();
+}
+
+function normalizeOutlineSections(sections, title) {
+  const safeTitle = compactText(title) || "这个主题";
+
+  const fallbackSections = [
+    {
+      id: "section_1",
+      order: 1,
+      title: "这件事真正刺痛了什么",
+      summary: `先从“${safeTitle}”背后的现实感受切入，不急着下结论。`,
+    },
+    {
+      id: "section_2",
+      order: 2,
+      title: "表面问题之外，还有更深的一层",
+      summary: "指出多数人容易看偏的地方，把真正的问题拎出来。",
+    },
+    {
+      id: "section_3",
+      order: 3,
+      title: "普通人为什么也该关注",
+      summary: "把话题落到现实影响、生活处境和普通人的判断上。",
+    },
+    {
+      id: "section_4",
+      order: 4,
+      title: "最后真正要看的，不是谁喊得响",
+      summary: "收束为一个克制但明确的判断，避免空泛总结。",
+    },
+  ];
+
+  if (!Array.isArray(sections) || !sections.length) {
+    return fallbackSections;
+  }
+
+  const normalized = sections
+    .slice(0, 5)
+    .map((item, index) => {
+      const rawTitle =
+        item?.title ||
+        item?.sectionTitle ||
+        item?.heading ||
+        item?.name ||
+        "";
+
+      const rawSummary =
+        item?.summary ||
+        item?.description ||
+        item?.desc ||
+        item?.content ||
+        item?.point ||
+        "";
+
+      return {
+        id: item?.id || `section_${index + 1}`,
+        order: Number(item?.order) || index + 1,
+        title:
+          compactText(rawTitle) ||
+          fallbackSections[index]?.title ||
+          `第${index + 1}部分`,
+        summary:
+          compactText(rawSummary) ||
+          fallbackSections[index]?.summary ||
+          "围绕这一部分继续展开观点和现实判断。",
+      };
+    });
+
+  while (normalized.length < 4) {
+    normalized.push(fallbackSections[normalized.length]);
+  }
+
+  return normalized;
 }
 
 function detectTitleType(title) {
@@ -112,19 +234,20 @@ function detectTitleType(title) {
   return "normal";
 }
 
-function buildArticlePrompt(title, platform) {
-  const p = normalizePlatform(platform);
+function buildArticlePrompt(title, platform, context = "") {
   const type = detectTitleType(title);
   const safeTitle = compactText(title) || "这个主题";
+  const contextBlock = buildContextBlock(context);
 
   const commonRules = `
+${contextBlock}
+
 通用要求：
 1. 写之前先在内部确定一个核心观点，但不要把“核心观点是”写出来。
 2. 整篇文章必须围绕这个观点展开，不要东一段西一段。
-3. 像人在表达，不要像AI总结材料。
-4. 涉及人物、领导人、公司高管、时事信息时，如果不确定最新情况，不要写死具体人名和身份。
-5. 不要编造事实，不要使用不确定的“当前、最新、最近”表达。
-6. 不要输出 Markdown 格式。
+3. 像人在表达，不要像 AI 总结材料。
+4. 有观点、有现实感，但不要为了爆文感编造事实。
+5. 不要输出 Markdown 格式。
 `.trim();
 
   if (type === "emotion") {
@@ -219,6 +342,7 @@ function buildSystemPrompt(platform) {
 你是一个今日头条内容作者。
 要求：标题和正文要有冲突感、判断感、现实感。
 正文要直接、有观点、有讨论空间。
+涉及当天时政热点时，必须尊重用户提供的事实素材；没有素材时不能编造具体事实。
 结尾不要主动写固定互动句，系统会单独处理。
 `.trim();
   }
@@ -227,6 +351,7 @@ function buildSystemPrompt(platform) {
     return `
 你是一个微头条作者。
 要求：短、直接、有观点，开头尽快抓住人。
+涉及事实信息时，不能编造具体人物、时间、地点。
 `.trim();
   }
 
@@ -235,6 +360,7 @@ function buildSystemPrompt(platform) {
 要求：有观点、有人味、有现实感。
 风格类似高阅读量观点号，但不要模仿具体作者句子。
 文章要像人在表达判断，不要像说明文。
+涉及时政热点时，必须围绕用户提供的新闻事实素材展开；没有素材时不能编造具体事实。
 `.trim();
 }
 
@@ -269,9 +395,21 @@ async function generateTitles({
   platform,
   persona,
   candidateCount = 4,
+  context,
+  newsContext,
+  newsFacts,
+  material,
+  materials,
 }) {
   const p = normalizePlatform(platform);
   const count = Math.max(3, Number(candidateCount) || 4);
+  const finalContext = getContextValue({
+    context,
+    newsContext,
+    newsFacts,
+    material,
+    materials,
+  });
 
   let userPrompt = "";
 
@@ -283,9 +421,20 @@ async function generateTitles({
     userPrompt = getWeitoutiaoPrompt(topic, count, compactText);
   }
 
+  userPrompt = `
+${userPrompt}
+
+${buildContextBlock(finalContext)}
+
+【标题额外要求】
+1. 如果提供了新闻事实素材，标题必须围绕素材里的具体事件展开，不能只写成泛泛的“这件事不简单”。
+2. 如果没有提供新闻事实素材，标题不要编造具体人物、时间、地点。
+3. 标题要有点击欲，但不能牺牲事实准确性。
+`.trim();
+
   try {
     const content = await callChatModel([{ role: "user", content: userPrompt }], {
-      temperature: 0.92,
+      temperature: 0.9,
       maxTokens: 900,
     });
 
@@ -316,11 +465,29 @@ async function generateTitles({
   return buildLocalTitleFallback(topic);
 }
 
-async function generateWeitoutiao({ topic, platform = "weitoutiao", persona }) {
+async function generateWeitoutiao({
+  topic,
+  platform = "weitoutiao",
+  persona,
+  context,
+  newsContext,
+  newsFacts,
+  material,
+  materials,
+}) {
   const safeTopic = compactText(topic) || "这个话题";
+  const finalContext = getContextValue({
+    context,
+    newsContext,
+    newsFacts,
+    material,
+    materials,
+  });
 
   const prompt = `
 请围绕主题“${safeTopic}”写一篇微头条。
+
+${buildContextBlock(finalContext)}
 
 要求：
 1. 200-400字。
@@ -336,7 +503,7 @@ async function generateWeitoutiao({ topic, platform = "weitoutiao", persona }) {
         { role: "system", content: buildSystemPrompt("weitoutiao") },
         { role: "user", content: prompt },
       ],
-      { temperature: 0.9, maxTokens: 800 }
+      { temperature: 0.86, maxTokens: 800 }
     );
 
     if (content) {
@@ -350,105 +517,128 @@ async function generateWeitoutiao({ topic, platform = "weitoutiao", persona }) {
   };
 }
 
-async function generateOutline({ title, platform, persona }) {
+async function generateOutline({
+  title,
+  platform,
+  persona,
+  context,
+  newsContext,
+  newsFacts,
+  material,
+  materials,
+}) {
   const safeTitle = compactText(title) || "这个主题";
+  const finalContext = getContextValue({
+    context,
+    newsContext,
+    newsFacts,
+    material,
+    materials,
+  });
 
   const prompt = `
-请围绕标题“${safeTitle}”生成文章大纲。
+请围绕标题“${safeTitle}”生成一份微信公众号文章大纲。
+
+${buildContextBlock(finalContext)}
 
 要求：
-1. 4个部分。
-2. 每个部分有标题和一句摘要。
-3. 不要太像教程，要有观点推进。
+1. 必须返回 4 个部分。
+2. 每个部分必须包含 id、order、title、summary。
+3. title 必须是完整小标题，不能只写数字。
+4. summary 必须是一句话摘要，说明这一部分要写什么。
+5. 风格要有观点推进，不要像教程或报告。
+6. 如果提供了新闻事实素材，大纲必须围绕素材里的事件展开。
+7. 只返回 JSON 数组，不要解释。
 
-返回 JSON 数组：
+返回格式必须严格如下：
 [
-  { "id": "section_1", "order": 1, "title": "部分标题", "summary": "一句摘要" }
+  {
+    "id": "section_1",
+    "order": 1,
+    "title": "这一部分的小标题",
+    "summary": "这一部分要展开的核心内容"
+  },
+  {
+    "id": "section_2",
+    "order": 2,
+    "title": "这一部分的小标题",
+    "summary": "这一部分要展开的核心内容"
+  }
 ]
-
-只返回 JSON。
 `.trim();
 
   try {
     const content = await callChatModel(
       [
-        { role: "system", content: buildSystemPrompt(platform) },
+        { role: "system", content: getWechatArticlePrompt(safeTitle, compactText) },
         { role: "user", content: prompt },
       ],
-      { temperature: 0.8, maxTokens: 900 }
+      { temperature: 0.74, maxTokens: 1000 }
     );
 
     const parsed = safeExtractJson(content, null);
+    const sections = normalizeOutlineSections(parsed, safeTitle);
 
-    if (Array.isArray(parsed)) {
-      return {
-        sections: parsed.map((item, index) => ({
-          id: item?.id || `section_${index + 1}`,
-          order: Number(item?.order) || index + 1,
-          title: compactText(item?.title) || `第${index + 1}部分`,
-          summary: compactText(item?.summary) || "",
-        })),
-      };
-    }
+    return {
+      sections,
+      fallback: !Array.isArray(parsed),
+    };
   } catch {}
 
   return {
-    sections: [
-      {
-        id: "section_1",
-        order: 1,
-        title: "先把问题抛出来",
-        summary: `围绕“${safeTitle}”直接进入核心问题。`,
-      },
-      {
-        id: "section_2",
-        order: 2,
-        title: "为什么很多人看偏了",
-        summary: "指出常见误解。",
-      },
-      {
-        id: "section_3",
-        order: 3,
-        title: "真正值得关注的地方",
-        summary: "展开现实影响。",
-      },
-      {
-        id: "section_4",
-        order: 4,
-        title: "最后给出判断",
-        summary: "收束全文。",
-      },
-    ],
+    sections: normalizeOutlineSections([], safeTitle),
     fallback: true,
   };
 }
 
-async function generateSection({ articleTitle, platform, persona, section }) {
+async function generateSection({
+  articleTitle,
+  platform,
+  persona,
+  section,
+  context,
+  newsContext,
+  newsFacts,
+  material,
+  materials,
+}) {
   const safeTitle = compactText(articleTitle) || "这个主题";
   const sectionTitle = compactText(section?.title) || "这一部分";
   const summary = compactText(section?.summary || "");
+  const finalContext = getContextValue({
+    context,
+    newsContext,
+    newsFacts,
+    material,
+    materials,
+  });
 
   const prompt = `
-请为文章“${safeTitle}”写其中一个部分。
+请为微信公众号文章“${safeTitle}”写其中一个部分。
+
+${buildContextBlock(finalContext)}
 
 当前部分：
-- 标题：${sectionTitle}
+- 小标题：${sectionTitle}
 - 摘要：${summary}
 
 要求：
-1. 像真人表达，不像材料总结。
-2. 有观点、有现实感。
-3. 不要使用 Markdown 小标题。
-4. 只返回正文。
+1. 这一段必须紧扣当前小标题，不要跑题。
+2. 要像真人表达，不像材料总结。
+3. 有判断、有现实感、有人的处境。
+4. 不要使用 Markdown 小标题。
+5. 不要写“首先、其次、最后”。
+6. 如果提供了新闻事实素材，必须围绕素材展开，不要泛泛而谈。
+7. 只返回正文。
 `.trim();
 
   try {
     const content = await callChatModel(
       [
-        { role: "system", content: buildSystemPrompt(platform) },
+        { role: "system", content: getWechatArticlePrompt(safeTitle, compactText) },
         { role: "user", content: prompt },
       ],
-      { temperature: 0.86, maxTokens: 1000 }
+      { temperature: 0.84, maxTokens: 1000 }
     );
 
     if (content) {
@@ -457,7 +647,7 @@ async function generateSection({ articleTitle, platform, persona, section }) {
   } catch {}
 
   return {
-    content: `围绕“${safeTitle}”，这一部分重点讲“${sectionTitle}”。${summary ? `\n\n${summary}` : ""}`,
+    content: `围绕“${safeTitle}”，这一部分最重要的是“${sectionTitle}”。${summary ? `\n\n${summary}` : ""}`,
     fallback: true,
   };
 }
@@ -478,7 +668,7 @@ async function generateToutiaoEnding({ title, content }) {
 
   try {
     const result = await callChatModel([{ role: "user", content: prompt }], {
-      temperature: 0.85,
+      temperature: 0.82,
       maxTokens: 120,
     });
 
@@ -509,14 +699,32 @@ async function generateArticle({
   title,
   platform,
   persona,
+  context,
+  newsContext,
+  newsFacts,
+  material,
+  materials,
   withOutline = true,
 }) {
   const p = normalizePlatform(platform);
   const safeTitle = compactText(title) || "这个主题";
+  const finalContext = getContextValue({
+    context,
+    newsContext,
+    newsFacts,
+    material,
+    materials,
+  });
 
   try {
     if (p === "wechat" && withOutline) {
-      const outlineResult = await generateOutline({ title, platform, persona });
+      const outlineResult = await generateOutline({
+        title,
+        platform,
+        persona,
+        context: finalContext,
+      });
+
       const sections = outlineResult.sections || [];
       const blocks = [];
 
@@ -526,6 +734,7 @@ async function generateArticle({
           platform,
           persona,
           section,
+          context: finalContext,
         });
 
         blocks.push(part.content || "");
@@ -543,6 +752,7 @@ async function generateArticle({
         topic: title,
         platform,
         persona,
+        context: finalContext,
       });
 
       return {
@@ -552,14 +762,14 @@ async function generateArticle({
       };
     }
 
-    const prompt = buildArticlePrompt(safeTitle, platform);
+    const prompt = buildArticlePrompt(safeTitle, platform, finalContext);
 
     const content = await callChatModel(
       [
         { role: "system", content: buildSystemPrompt(platform) },
         { role: "user", content: prompt },
       ],
-      { temperature: 0.88, maxTokens: 1800 }
+      { temperature: 0.84, maxTokens: 1800 }
     );
 
     if (content) {

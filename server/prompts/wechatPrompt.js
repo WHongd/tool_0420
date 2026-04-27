@@ -60,3 +60,6 @@ function getWechatPrompt(topic, count, compactText) {
 只返回 JSON，不要解释
 `.trim();
 }
+module.exports = {
+  getWechatPrompt,
+};
